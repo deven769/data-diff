@@ -2,18 +2,19 @@ import pandas as pd
 import sqlalchemy
 from sqlalchemy import text
 import html
+import time
 
 class OptimizedDBComparisonTool:
     def __init__(self, db_connection_string):
         self.engine = sqlalchemy.create_engine(db_connection_string)
 
-    def fetch_data(self, table_name):
-        query = text(f"SELECT * FROM {table_name}")
+    def fetch_data(self, table_name, limit):
+        query = text(f"SELECT * FROM {table_name} LIMIT {limit}")
         return pd.read_sql(query, self.engine)
 
-    def compare_tables(self, source_table, dest_table, compare_by):
-        source_df = self.fetch_data(source_table)
-        dest_df = self.fetch_data(dest_table)
+    def compare_tables(self, source_table, dest_table, compare_by, s_limit, d_limit):
+        source_df = self.fetch_data(source_table, s_limit)
+        dest_df = self.fetch_data(dest_table, d_limit)
 
         # Ensure compare_by columns exist in both dataframes
         assert all(col in source_df.columns for col in compare_by), "Compare by column(s) not found in source table"
@@ -25,7 +26,7 @@ class OptimizedDBComparisonTool:
 
         # Set of all unique keys for comparison
         all_keys = set(source_grouped.index).union(set(dest_grouped.index))
-        print(all_keys)
+        # print(all_keys)
         # import pdb; pdb.set_trace()
 
         comparison_result = []
@@ -135,7 +136,14 @@ if __name__ == "__main__":
     dest_table = "destination"
     
     # Dynamic "compare by" column
-    compare_by = ['id']  # Change this to ['id'], ['id', 'name', 'city'], etc.
+    compare_by = ['id']
 
-    comparison_result = tool.compare_tables(source_table, dest_table, compare_by)
+    s_limit = 5000
+    d_limit = 5000
+
+    now = time.time()
+    comparison_result = tool.compare_tables(source_table, dest_table, compare_by, s_limit, d_limit)
     tool.generate_html(comparison_result)
+    end = time.time()
+    execution_time = end - now
+    print(f"Execution time: {execution_time:.2f} seconds")
