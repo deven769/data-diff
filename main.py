@@ -1,152 +1,141 @@
 import pandas as pd
-import random
-import string
+import sqlalchemy
+from sqlalchemy import text
+import html
 
-# Function to generate random strings
-def random_string(length=5):
-    return ''.join(random.choices(string.ascii_uppercase, k=length))
+class OptimizedDBComparisonTool:
+    def __init__(self, db_connection_string):
+        self.engine = sqlalchemy.create_engine(db_connection_string)
 
-# Function to generate random flags (True/False)
-def random_flag():
-    return random.choice([True, False])
+    def fetch_data(self, table_name):
+        query = text(f"SELECT * FROM {table_name}")
+        return pd.read_sql(query, self.engine)
 
-# Generate source_data with potential duplicate ids/names
-def generate_data(size):
-    ids = [random.randint(1, 50) for _ in range(size)]  # Randomly pick ids from 1 to 50, allowing duplicates
-    names = [random_string() for _ in range(size)]
-    flags = [random_flag() for _ in range(size)]
-    return pd.DataFrame({'id': ids, 'name': names, 'flag': flags})
+    def compare_tables(self, source_table, dest_table, compare_by):
+        source_df = self.fetch_data(source_table)
+        dest_df = self.fetch_data(dest_table)
 
-# Generate source and destination datasets
-source_df = generate_data(100)  # Source has 100 records
-destination_df = generate_data(200)  # Destination has 200 records
-
-# Ensure the data types of source and destination columns match
-for column in source_df.columns:
-    if column in destination_df.columns:
-        destination_df[column] = destination_df[column].astype(source_df[column].dtype)
-
-# Strip whitespace from name columns (if necessary)
-source_df['name'] = source_df['name'].str.strip()
-destination_df['name'] = destination_df['name'].str.strip()
-
-# Introduce random matching records between source and destination
-def introduce_matches(source_df, destination_df, num_matches=50):
-    for i in range(num_matches):
-        # Pick a random index from the destination and update it to match a random source row
-        dest_idx = random.randint(0, len(destination_df) - 1)
-        src_idx = random.randint(0, len(source_df) - 1)
+        # Ensure compare_by columns exist in both dataframes
+        assert all(col in source_df.columns for col in compare_by), "Compare by column(s) not found in source table"
+        assert all(col in dest_df.columns for col in compare_by), "Compare by column(s) not found in destination table"
         
-        destination_df.at[dest_idx, 'id'] = source_df.at[src_idx, 'id']
-        destination_df.at[dest_idx, 'name'] = source_df.at[src_idx, 'name']
-        destination_df.at[dest_idx, 'flag'] = source_df.at[src_idx, 'flag']
+        # Group by the compare_by columns for both dataframes
+        source_grouped = source_df.groupby(compare_by).apply(lambda x: x.reset_index(drop=True))
+        dest_grouped = dest_df.groupby(compare_by).apply(lambda x: x.reset_index(drop=True))
 
-introduce_matches(source_df, destination_df, num_matches=50)  # Introduce 50 random matches
+        # Set of all unique keys for comparison
+        all_keys = set(source_grouped.index).union(set(dest_grouped.index))
+        print(all_keys)
+        # import pdb; pdb.set_trace()
 
-# Function to compare tables and highlight differences
-def compare_tables(source_df, destination_df, compare_by):
-    unmatched_destinations = destination_df.copy()
-    matched_source = []
-    matched_dest = []
+        comparison_result = []
+        for key in sorted(all_keys):
+            # Fetch all rows for the given key in both source and destination
+            source_rows = source_grouped[source_grouped.index == key]
+            dest_rows = dest_grouped[dest_grouped.index == key]
 
-    source_diff = pd.DataFrame(False, index=source_df.index, columns=source_df.columns)
-    dest_diff = pd.DataFrame(False, index=destination_df.index, columns=destination_df.columns)
-
-    # Iterate over the source DataFrame and try to match each row to a destination row
-    for src_idx, source_row in source_df.iterrows():
-        # Look for rows in destination with matching `id` (or other `compare_by` fields)
-        matching_dest_rows = unmatched_destinations[
-            (unmatched_destinations[compare_by] == source_row[compare_by]).all(axis=1)
-        ]
-
-        # Check if a matching row exists
-        if not matching_dest_rows.empty:
-            found_match = False
-            # Compare each matching destination row with the source row for full match
-            for dest_idx, dest_row in matching_dest_rows.iterrows():
-                match = True
-                for col in source_df.columns:
-                    if source_row[col] != dest_row[col]:
-                        # If any column doesn't match, mark them as different
-                        source_diff.at[src_idx, col] = True
-                        dest_diff.at[dest_idx, col] = False  # Mark as not different for the destination row
-                        match = False
-                
-                if match:
-                    # Exact match found, mark both as matched
-                    matched_source.append(src_idx)
-                    matched_dest.append(dest_idx)
-                    unmatched_destinations.drop(dest_idx, inplace=True)
-                    found_match = True
-                    break  # Stop checking further if exact match is found
+            max_len = max(len(source_rows), len(dest_rows))
             
-            # If no exact match, mark the source row as partially matched
-            if not found_match:
-                for col in source_df.columns:
-                    if col != compare_by[0]:  # Exclude the compare_by column from marking as different
-                        dest_diff.at[dest_idx, col] = True  # Highlight destination row differences
-            
-        else:
-            # No match at all, mark the source row as different
-            source_diff.loc[src_idx] = True
+            for i in range(max_len):
+                # Fetch rows or empty rows if one table has fewer rows
+                source_row = source_rows.iloc[i] if i < len(source_rows) else pd.Series(dtype='object')
+                dest_row = dest_rows.iloc[i] if i < len(dest_rows) else pd.Series(dtype='object')
 
-    # Mark the remaining unmatched destination rows as different
-    for dest_idx in unmatched_destinations.index:
-        dest_diff.loc[dest_idx] = True
+                # Compare the rows
+                if source_row.empty and not dest_row.empty:
+                    # Row only in destination (green)
+                    comparison_result.append(('', '', 'lightgreen', dest_row.tolist()))
+                elif not source_row.empty and dest_row.empty:
+                    # Row only in source (red)
+                    comparison_result.append((key, source_row.tolist(), 'lightcoral', ''))
+                else:
+                    # Row in both, compare column by column
+                    row_result = []
+                    for source_val, dest_val in zip(source_row, dest_row):
+                        if source_val == dest_val:
+                            # Columns match (white)
+                            row_result.append(('white', source_val, dest_val))
+                        else:
+                            # Columns differ (blue)
+                            row_result.append(('lightblue', source_val, dest_val))
+                    comparison_result.append((key, row_result))
+        print(comparison_result)
 
-    return matched_source, matched_dest, unmatched_destinations.index.tolist(), source_diff, dest_diff
+        return comparison_result
 
-# Function to display and highlight differences
-def highlight_differences(source_df, destination_df, matched_source, matched_dest, unmatched_dest, source_diff, dest_diff):
-    def highlight_row_source(row):
-        # Highlight the source rows: green if no difference, yellow if difference
-        colors = ['background-color: green' if not diff else 'background-color: yellow' for diff in source_diff.loc[row.name]]
-        return colors
-
-    def highlight_row_destination(row):
-        # Highlight the destination rows: green if no difference, yellow if difference
-        colors = ['background-color: green' if not diff else 'background-color: yellow' for diff in dest_diff.loc[row.name]]
-        return colors
-
-    # Reorder the source and destination DataFrames
-    source_ordered = pd.concat([
-        source_df.loc[matched_source],
-        source_df[~source_df.index.isin(matched_source)]
-    ])
-    
-    destination_ordered = pd.concat([
-        destination_df.loc[matched_dest],
-        destination_df.loc[unmatched_dest]
-    ])
-    
-    # Style the reordered DataFrames
-    source_styled = source_ordered.style.apply(highlight_row_source, axis=1)
-    destination_styled = destination_ordered.style.apply(highlight_row_destination, axis=1)
-
-    # Save to HTML file
-    with open("html/output.html", "w") as f:
-        f.write(f"""
+    def generate_html(self, comparison_result):
+        html_content = """
         <html>
-        <head><style>table {{border-collapse: collapse;}} td, th {{padding: 8px; border: 1px solid black;}}</style></head>
+        <head>
+            <style>
+                table { border-collapse: collapse; width: 100%; }
+                th, td { border: 1px solid black; padding: 8px; text-align: left; }
+                th { background-color: #f2f2f2; }
+                .cell { padding: 4px; }
+            </style>
+        </head>
         <body>
-            <div style="display: flex;">
-                <div style="flex: 1; padding-right: 20px;">
-                    <h3>Source Data (Matches on Top)</h3>
-                    {source_styled.to_html()}
-                </div>
-                <div style="flex: 1;">
-                    <h3>Destination Data (Matches on Top)</h3>
-                    {destination_styled.to_html()}
-                </div>
-            </div>
+            <table>
+                <tr>
+                    <th>Source Index</th>
+                    <th>Source Data</th>
+                    <th>Destination Index</th>
+                    <th>Destination Data</th>
+                </tr>
+        """
+
+        for idx, result in enumerate(comparison_result, start=1):
+            if len(result) == 4:
+                # Row only exists in source or destination
+                source_idx, source_data, color, dest_data = result
+                html_content += f"<tr style='background-color: {color};'>"
+                if source_data:
+                    html_content += f"<td>{source_idx}</td><td>{' '.join(map(str, source_data))}</td>"
+                else:
+                    html_content += "<td></td><td></td>"
+                
+                if dest_data:
+                    html_content += f"<td>{idx}</td><td>{' '.join(map(str, dest_data))}</td>"
+                else:
+                    html_content += "<td></td><td></td>"
+            else:
+                # Partial match or exact match, render column-wise
+                source_idx, row_result = result
+                html_content += "<tr>"
+
+                # Source columns
+                html_content += f"<td>{source_idx}</td><td>"
+                for color, source_val, _ in row_result:
+                    html_content += f"<span class='cell' style='background-color: {color};'>{html.escape(str(source_val))}</span> "
+                html_content += "</td>"
+
+                # Destination columns
+                html_content += f"<td>{idx}</td><td>"
+                for color, _, dest_val in row_result:
+                    html_content += f"<span class='cell' style='background-color: {color};'>{html.escape(str(dest_val))}</span> "
+                html_content += "</td></tr>"
+
+        html_content += """
+            </table>
         </body>
         </html>
-        """)
-    print("Styled output saved as 'output.html'. Open this file in a browser to view the highlighted differences.")
+        """
+
+        with open("html/comparison_result.html", "w") as f:
+            f.write(html_content)
+
+        print("Comparison result saved as 'comparison_result.html'")
 
 # Example usage
-compare_by = ['name']  # Compare by 'id' only, but match all other columns as well
-matched_source, matched_dest, unmatched_dest, source_diff, dest_diff = compare_tables(source_df, destination_df, compare_by)
+if __name__ == "__main__":
+    db_connection_string = "postgresql://deven:deven8000@localhost:5432/datadiff"
+    tool = OptimizedDBComparisonTool(db_connection_string)
+    
+    source_table = "source"
+    dest_table = "destination"
+    
+    # Dynamic "compare by" column
+    compare_by = ['id']  # Change this to ['id'], ['id', 'name', 'city'], etc.
 
-# Display both tables side by side with highlighted differences
-highlight_differences(source_df, destination_df, matched_source, matched_dest, unmatched_dest, source_diff, dest_diff)
+    comparison_result = tool.compare_tables(source_table, dest_table, compare_by)
+    tool.generate_html(comparison_result)
